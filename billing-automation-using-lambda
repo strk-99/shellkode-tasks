@@ -1,0 +1,113 @@
+import boto3
+import csv
+import json
+from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+# AWS Clients
+ce_client = boto3.client("ce")  # AWS Cost Explorer
+ses_client = boto3.client("ses", region_name="ap-south-1")  # AWS SES
+
+# Email Configuration
+SENDER = "strk6399@gmail.com"  #  Use verified SES email
+RECIPIENT = "surya.krishna@shellkode.com"  # Change recipient email
+SUBJECT = "AWS Monthly Billing Report"
+
+# Function to fetch AWS Cost Explorer data for the **full month**
+def get_billing_data(year, month):
+    start_date = f"{year}-{month:02d}-01"  # First day of month
+    end_date = (datetime(year, month, 1) + timedelta(days=32)).replace(day=1).strftime("%Y-%m-%d")  # First day of next month
+
+    response = ce_client.get_cost_and_usage(
+        TimePeriod={"Start": start_date, "End": end_date},
+        Granularity="MONTHLY",  #  Fetch **full month's** data
+        Metrics=["BlendedCost"],
+        GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}]
+    )
+    return response, start_date, end_date
+
+# Function to generate CSV
+def generate_csv(billing_data, start_date):
+    csv_file_path = "/tmp/aws_billing_report.csv"
+
+    with open(csv_file_path, "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Month", "Service", "Usage Cost ($)", "Discounts ($)", "GST ($)", "Credits ($)", "Total Cost ($)"])
+
+        total_cost = 0
+        for service in billing_data["ResultsByTime"][0]["Groups"]:
+            service_name = service["Keys"][0]
+            if service_name != 'Tax':
+                usage_cost = float(service["Metrics"]["BlendedCost"].get("Amount", 0))  # Ensure 0 for missing values
+                gst = usage_cost * 0.18  # GST assumption
+                total = usage_cost + gst  # No discounts/credits applied
+
+                total_cost += total
+                writer.writerow([start_date[:7], service_name, round(usage_cost, 2), "0.00", round(gst, 2), "0.00", round(total, 2)])
+
+        # Write total row
+        writer.writerow(["TOTAL", "", "", "", "", "", round(total_cost, 2)])
+
+    return csv_file_path, total_cost
+
+# Function to send email
+def send_email(csv_file_path, start_date, total_cost):
+    msg = MIMEMultipart()
+    msg["Subject"] = SUBJECT
+    msg["From"] = SENDER
+    msg["To"] = RECIPIENT
+
+    body_text = f"""Hello,
+
+Please find attached the AWS billing report for {start_date[:7]}.
+
+**Total Cost Before GST:** ${total_cost / 1.18:.2f}  
+**GST (18% Assumed):** ${total_cost - (total_cost / 1.18):.2f}  
+**Final Bill:** ${total_cost:.2f}
+
+Regards,  
+AWS Billing Team
+"""
+    msg.attach(MIMEText(body_text, "plain"))
+
+    with open(csv_file_path, "rb") as attachment:
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(attachment.read())
+
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", "attachment", filename="aws_billing_report.csv")
+    msg.attach(part)
+
+    response = ses_client.send_raw_email(
+        Source=SENDER,
+        Destinations=[RECIPIENT],
+        RawMessage={"Data": msg.as_string()},
+    )
+
+    return response["MessageId"]
+
+# Lambda Handler
+def lambda_handler(event, context):
+    try:
+        # Fetch year and month from event or default to last month
+        today = datetime.today()
+        last_month = today.month - 1 if today.month > 1 else 12
+        year = today.year if today.month > 1 else today.year - 1
+
+        billing_data, start_date, end_date = get_billing_data(year, last_month)
+        csv_file_path, total_cost = generate_csv(billing_data, start_date)
+        message_id = send_email(csv_file_path, start_date, total_cost)
+
+        return {
+            "statusCode": 200,
+            "body": f"Billing report for {start_date[:7]} sent successfully! Message ID: {message_id}"
+        }
+
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
