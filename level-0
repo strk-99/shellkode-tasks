@@ -1,0 +1,30 @@
+Resources:
+  myVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+       - Key: stack
+         Value: test-cft-vpc
+
+  mySubnet1:
+   Type: AWS::EC2::Subnet
+   Properties:
+     VpcId: !Ref myVPC
+     CidrBlock: 10.0.1.0/24
+     AvailabilityZone: "ap-south-1a"
+     Tags:
+     - Key: stack
+       Value: subnet1
+
+  mySubnet2:
+   Type: AWS::EC2::Subnet
+   Properties:
+     VpcId: !Ref myVPC
+     CidrBlock: 10.0.2.0/24
+     AvailabilityZone: "ap-south-1b"
+     Tags:
+     - Key: stack
+       Value: subnet2
